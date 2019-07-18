@@ -1,0 +1,238 @@
+---
+title: "main"
+author: "Gabriel Krotkov"
+date: "June 14, 2019"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+---
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#library code chunk
+source("utility_functions.R")
+library(tidyverse)
+library(reshape2)
+library(pander)
+library(readxl)
+library(gridExtra)
+library(GGally)
+```
+
+# Data cleaning
+
+```{r, error = FALSE, message = FALSE, warning = FALSE}
+#Data reading/cleaning
+
+# EDIT THESE VARIABLES
+file_path <- "data/dirty_quiz2_m19.xlsx"
+start_row <- 4
+start_col <- 2
+# ignore_rows and ignore_cols should be NULL if no ignores
+ignore_rows = NULL
+ignore_cols = 2
+# true means question scores are negative
+negative_scores <- TRUE
+to_clean <- TRUE
+
+if(to_clean){
+  data <- read_grades(file_path, start_row, start_col,
+                    negative_scores, ignore_rows, ignore_cols)
+} else{
+  data <- read_xlsx(file_path, col_names = FALSE)
+}
+
+
+quiz <- data$grade
+
+names(quiz) <- tolower(names(quiz))
+
+# The "questions" vector is a numeric vector of the maximum values of each question.
+# The names of the question vector are the corresponding questions.
+# We do not include total as a question
+questions <- data$questions
+
+quiz <- na.omit(quiz)
+
+# Use as.ordered instead of as.factor so that we can compare between levels.
+quiz$quartile <- as.ordered(cut(quiz$total, quantile(quiz$total), 
+                                labels = FALSE, 
+                                include.lowest = TRUE))
+# ASSUMPTION: quiz now has the form:
+# section | (optional) version | question_1 | question_2 | ... | total | quartile
+# A       |        A/B         |    15      |     14     | ... |  80   |    3  
+# etc.
+# Most importantly: there *cannot* be a numeric variable before 
+# the first question variable, and the questions must be uninterrupted!
+
+# Assumed that the first col is the section variable
+sections <- levels(quiz[, 1][[1]])
+
+#Compute summary statistics for each section
+
+sections_median <- vector(length = length(sections))
+sections_mean <- vector(length = length(sections))
+names(sections_median) <- sections
+names(sections_mean) <- sections
+
+
+for (i in 1:length(sections)){
+  sections_median[i] <- median(quiz[quiz$section == sections[i], ]$total)
+  sections_mean[i] <- mean(quiz[quiz$section == sections[i], ]$total)
+}
+
+median_index <- 3
+
+cat("The median of the total grades was: ", 
+    quantile(quiz$total)[[median_index]], "\n")
+
+cat("The average of the total grades was: ", 
+    mean(quiz$total), "\n\n")
+
+cat("Median of each section:")
+pander(sections_median)
+
+cat("Mean of each section:")
+pander(sections_mean)
+```
+
+# Overall distribution (evergreen)
+
+```{r}
+ggplot(quiz, aes(x = total)) + 
+  geom_density(fill = "blue") + 
+  labs(title = "Distribution of total grades", 
+       x = "Total grade", 
+       y = "Density", 
+       caption = "Data from 112 staff")
+
+ggplot(quiz, aes(x = total, fill = section)) + 
+  geom_density(alpha = 0.5) + 
+  labs(title = "Distribution of total grades", 
+       subtitle = "Split by section", 
+       x = "Total grade", 
+       y = "Density", 
+       caption = "Data from 112 staff")
+
+ggplot(quiz, aes(x = total, fill = quartile)) + 
+  geom_density(alpha = 0.5) + 
+  labs(title = "Distribution of total grades", 
+       subtitle = "Split by quartile", 
+       x = "Total grade", 
+       y = "Density", 
+       caption = "Data from 112 staff")
+
+# offset_ind is the max nonnumeric variable col index
+offset_ind <- min(which(sapply(quiz, is.numeric))) - 1
+start_col <- offset_ind + 1
+end_col <- ncol(quiz) - 1
+# We append 100 to questions to represent the total
+scaled <- data.frame(scale(quiz[, start_col:end_col], 
+                           center = FALSE, 
+                           scale = append(questions, 100)))
+
+melted <- melt(scaled)
+
+# Defaults to names(questions) since that includes each question. 
+# We make it lowercase since we've cast the variable titles to lowercase
+questions_filtered <- tolower(names(questions))
+
+idx <- melted$variable %in% questions_filtered
+melted_filtered <- melted[idx, ]
+ggplot(melted_filtered, aes(x=value, fill=variable)) + 
+  geom_density(alpha=0.25) + 
+  labs(title = "Scale density graph of percentage score")
+```
+
+# Specific Question Distributions
+
+```{r, fig.width = 10, fig.height = 10}
+
+compute_density <- function(data, col){
+  title <- paste(names(data)[col], "Distribution")
+  cap <- "Data from 112 staff"
+  x_lab <- "Score"
+  y_lab <- "Density"
+  plot <- ggplot(quiz, aes_q(x = as.name(names(data)[col]))) + 
+    geom_density(fill = "dark blue") + 
+    labs(title = title, x = x_lab, y = y_lab, 
+         caption = cap)
+  
+  return(plot)
+}
+
+densities <- list()
+
+for (i in (offset_ind + 1):(ncol(quiz) - 2)){
+  plot <- compute_density(quiz, i)
+  # back-index by offset_ind since i is initially offset
+  densities[[i - offset_ind]] <- plot
+}
+
+grid.arrange(grobs = densities, ncol = 2)
+```
+
+# Bottom Half
+
+```{r}
+bottomhalf <- quiz[quiz$quartile <= 2, ]
+
+bottomhalf$quartile <- as.factor(cut(bottomhalf$total, 
+                                     quantile(bottomhalf$total), 
+                                 labels = FALSE, 
+                                 include.lowest = TRUE))
+
+ggplot(bottomhalf, aes(x = total)) + 
+  geom_density(fill = "purple") + 
+  labs(title = "Total Score Density of the bottom quarter", 
+       x = "Score", 
+       y = "Density")
+
+#Where did the bottom half lose points relative to the total class?
+differences <- vector(length = length(questions))
+names(differences) <- names(questions)
+
+for (i in (offset_ind + 1):(ncol(quiz) - 2)){
+  differences[i - offset_ind] <- (mean(quiz[[i]]) - mean(bottomhalf[[i]])) * 
+    (1 / questions[i - offset_ind])
+}
+
+cat("\nThis is how much worse as a % of the question the bottom half did than the average student \n")
+differences
+```
+
+
+
+# Pairs Plot
+
+```{r, fig.width = 10, fig.height = 10, warning = FALSE, echo = FALSE, error = FALSE, message = FALSE}
+ggpairs(quiz, aes(color = quartile, fill = quartile))
+```
+
+# MDS
+
+To me, this MDS implies that if you're doing well on this quiz you had to follow a quite specific path to accruing/losing points, while the people who are doing poorly did poorly in wildly different ways. 
+
+
+```{r, fig.width = 10, fig.height = 10}
+# Remove the "section", "total", and "quartile" columns
+mds_quiz <- quiz[, -c(1:offset_ind, ncol(quiz) - 1, ncol(quiz))]
+quiz_cont <- mds_quiz %>%
+  subset(select = c(1:ncol(mds_quiz)))
+
+quiz_cont_scale <- scale(quiz_cont, center = TRUE, scale = TRUE)
+
+dist_quiz <- dist(quiz_cont_scale, method = "euclidean")
+quiz_projection <- cmdscale(dist_quiz, k = 2)
+
+quiz <- quiz %>%
+  mutate(projection1 = quiz_projection[, 1], 
+         projection2 = quiz_projection[, 2])
+
+ggplot(quiz, aes(x = projection1, y = projection2)) + 
+  geom_point(aes(color = quartile)) + 
+  labs(title = "MDS Projection for Quiz 1", 
+       x = "MDS Coordinate 1", 
+       y = "MDS Coordinate 2", 
+       caption = "Data collected by 112 course staff")
+```
